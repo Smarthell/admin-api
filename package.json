@@ -1,0 +1,14 @@
+{
+  "name": "admin-api",
+  "version": "1.0.0",
+  "description": "无人机训练管理系统后台API",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "wx-server-sdk": "~2.6.3"
+  }
+}
