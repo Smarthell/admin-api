@@ -1,86 +1,19 @@
 const express = require('express')
 const cors = require('cors')
-const https = require('https')
+
+// 初始化云开发 SDK
+const cloud = require('wx-server-sdk')
+cloud.init({ env: process.env.CLOUD_ENV || 'cloud1-d9gcbuql8f6a0bbaa' })
 
 const app = express()
+const db = cloud.database()
+const _ = db.command
 
 // 中间件
 app.use(cors())
 app.use(express.json({ limit: '10mb' }))
 
-// 云开发配置
-const CLOUD_ENV = process.env.CLOUD_ENV || 'cloud1-d9gcbuql8f6a0bbaa'
-const REST_API_BASE = `https://${CLOUD_ENV}.service.tcloudbase.com`
-
-// 通过云开发 REST API 访问数据库
-async function callRestApi(path, method = 'GET', data = null) {
-  return new Promise((resolve, reject) => {
-    const url = new URL(REST_API_BASE + path)
-    const options = {
-      hostname: url.hostname,
-      path: url.pathname + url.search,
-      method: method,
-      headers: { 'Content-Type': 'application/json' }
-    }
-    
-    const req = https.request(options, (res) => {
-      let body = ''
-      res.on('data', (chunk) => { body += chunk })
-      res.on('end', () => {
-        try {
-          const json = JSON.parse(body)
-          resolve(json)
-        } catch (e) {
-          resolve({ success: true, data: body })
-        }
-      })
-    })
-    
-    req.on('error', reject)
-    
-    if (data) {
-      req.write(JSON.stringify(data))
-    }
-    req.end()
-  })
-}
-
-// 数据库操作封装
-async function dbList(collection, query = {}, page = 1, pageSize = 50) {
-  const skip = (page - 1) * pageSize
-  let path = `/db/${collection}?skip=${skip}&limit=${pageSize}`
-  
-  if (Object.keys(query).length > 0) {
-    path += `&where=${encodeURIComponent(JSON.stringify(query))}`
-  }
-  
-  return callRestApi(path, 'GET')
-}
-
-async function dbCount(collection, query = {}) {
-  let path = `/db/${collection}/count`
-  if (Object.keys(query).length > 0) {
-    path += `?where=${encodeURIComponent(JSON.stringify(query))}`
-  }
-  return callRestApi(path, 'GET')
-}
-
-async function dbAdd(collection, data) {
-  const path = `/db/${collection}`
-  return callRestApi(path, 'POST', data)
-}
-
-async function dbUpdate(collection, docId, data) {
-  const path = `/db/${collection}/${docId}`
-  return callRestApi(path, 'PUT', data)
-}
-
-async function dbDelete(collection, docId) {
-  const path = `/db/${collection}/${docId}`
-  return callRestApi(path, 'DELETE')
-}
-
-// 健康检查（必须快速响应）
+// 健康检查
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: Date.now() })
 })
@@ -97,16 +30,14 @@ app.post('/api', async (req, res) => {
       if (!username || !password) {
         result = { success: false, error: '请输入账号和密码' }
       } else {
-        // 查询数据库
         try {
-          const loginRes = await dbList('admins', { username, password }, 1, 1)
-          const list = loginRes.data || loginRes.data?.list || []
-          if (list.length > 0 || (Array.isArray(loginRes.data) && loginRes.data.length > 0)) {
-            const admin = Array.isArray(loginRes.data) ? loginRes.data[0] : loginRes.data
+          const loginRes = await db.collection('admins').where({ username, password }).limit(1).get()
+          if (loginRes.data.length > 0) {
+            const admin = loginRes.data[0]
             result = {
               success: true,
-              token: 'admin_' + (admin._id || Date.now()),
-              admin: { username: admin.username || username, role: admin.role || 'admin' }
+              token: 'admin_' + admin._id + '_' + Date.now(),
+              admin: { username: admin.username, role: admin.role || 'admin' }
             }
           } else if (username === 'admin' && password === 'admin123') {
             result = {
@@ -135,33 +66,47 @@ app.post('/api', async (req, res) => {
     else if (collection) {
       // list 查询
       if (action === 'list') {
-        let dbQuery = { ...query }
-        
-        // 处理 datePrefix
-        if (dbQuery.datePrefix) {
-          const prefix = dbQuery.datePrefix
-          delete dbQuery.datePrefix
-          dbQuery.date = dbQuery.date || {}
-          dbQuery.date = { $regex: '^' + prefix }
+        const skip = (page - 1) * pageSize
+        let dbQuery = db.collection(collection)
+
+        // 处理 datePrefix（用于按月查询训练报备）
+        if (query.datePrefix) {
+          const prefix = query.datePrefix
+          delete query.datePrefix
+          query.date = db.RegExp({ regexp: '^' + prefix, options: 'i' })
         }
-        
-        const listRes = await dbList(collection, dbQuery, page, pageSize)
-        const countRes = await dbCount(collection, dbQuery)
-        const total = countRes.total || countRes.data?.total || 0
-        
-        result = { 
-          success: true, 
-          data: listRes.data || listRes.list || [], 
-          total: total, 
-          page, 
-          pageSize 
+
+        // 处理 in 查询
+        Object.keys(query).forEach(key => {
+          if (query[key] && typeof query[key] === 'object' && query[key].in) {
+            query[key] = _.in(query[key].in)
+          }
+        })
+
+        if (Object.keys(query).length > 0) {
+          dbQuery = dbQuery.where(query)
+        }
+
+        const countRes = await dbQuery.count()
+        const listRes = await dbQuery.skip(skip).limit(pageSize).get()
+
+        result = {
+          success: true,
+          data: listRes.data,
+          total: countRes.total,
+          page,
+          pageSize
         }
       }
 
       // count 查询
       else if (action === 'count') {
-        const countRes = await dbCount(collection, query)
-        result = { success: true, total: countRes.total || countRes.data?.total || 0 }
+        let dbQuery = db.collection(collection)
+        if (query && Object.keys(query).length > 0) {
+          dbQuery = dbQuery.where(query)
+        }
+        const countRes = await dbQuery.count()
+        result = { success: true, total: countRes.total }
       }
 
       // stats 统计
@@ -170,8 +115,8 @@ app.post('/api', async (req, res) => {
         const stats = {}
         for (const col of collections) {
           try {
-            const res = await dbCount(col)
-            stats[col] = res.total || res.data?.total || 0
+            const res = await db.collection(col).count()
+            stats[col] = res.total
           } catch (e) {
             stats[col] = 0
           }
@@ -179,9 +124,8 @@ app.post('/api', async (req, res) => {
         // 计算总题目数
         let totalQuestions = 0
         try {
-          const chaptersRes = await dbList('chapters', {}, 1, 100)
-          const chapters = chaptersRes.data || chaptersRes.list || []
-          chapters.forEach(ch => { totalQuestions += (ch.questions || []).length })
+          const chaptersRes = await db.collection('chapters').get()
+          chaptersRes.data.forEach(ch => { totalQuestions += (ch.questions || []).length })
         } catch (e) {}
         stats.totalQuestions = totalQuestions
         result = { success: true, stats }
@@ -189,8 +133,8 @@ app.post('/api', async (req, res) => {
 
       // add 添加
       else if (action === 'add') {
-        const res = await dbAdd(collection, { ...data, createdAt: Date.now() })
-        result = { success: true, _id: res._id || res.data?._id }
+        const res = await db.collection(collection).add({ data: { ...data, createdAt: new Date() } })
+        result = { success: true, _id: res._id }
       }
 
       // update 更新
@@ -198,7 +142,7 @@ app.post('/api', async (req, res) => {
         if (!docId) {
           result = { success: false, error: '缺少 docId' }
         } else {
-          await dbUpdate(collection, docId, { ...data, updatedAt: Date.now() })
+          await db.collection(collection).doc(docId).update({ data: { ...data, updatedAt: new Date() } })
           result = { success: true }
         }
       }
@@ -208,7 +152,7 @@ app.post('/api', async (req, res) => {
         if (!docId) {
           result = { success: false, error: '缺少 docId' }
         } else {
-          await dbDelete(collection, docId)
+          await db.collection(collection).doc(docId).remove()
           result = { success: true }
         }
       }
@@ -222,7 +166,7 @@ app.post('/api', async (req, res) => {
           const results = []
           for (const id of ids) {
             try {
-              await dbDelete(collection, id)
+              await db.collection(collection).doc(id).remove()
               results.push({ id, success: true })
             } catch (e) {
               results.push({ id, success: false, error: e.message })
@@ -237,11 +181,51 @@ app.post('/api', async (req, res) => {
         if (!docId) {
           result = { success: false, error: '缺少 docId' }
         } else {
-          await dbUpdate('trainingPlans', docId, { 
-            status: 'confirmed', 
-            confirmedAt: Date.now() 
+          await db.collection('trainingPlans').doc(docId).update({
+            data: { status: 'confirmed', confirmedAt: new Date() }
           })
           result = { success: true }
+        }
+      }
+
+      // importQuestions 批量导入题目
+      else if (action === 'importQuestions') {
+        const { subject, chapters, mode = 'merge' } = req.body
+        if (!subject || !Array.isArray(chapters)) {
+          result = { success: false, error: '参数错误' }
+        } else {
+          const results = { created: 0, updated: 0, totalQuestions: 0, skipped: 0, errors: [] }
+          for (const chapterData of chapters) {
+            try {
+              const { name, questions = [] } = chapterData
+              if (!name) { results.errors.push('章节名称不能为空'); continue }
+              const existing = await db.collection('chapters').where({ name, subject }).get()
+              if (existing.data.length > 0) {
+                const chapter = existing.data[0]
+                if (mode === 'skip') { results.skipped++; continue }
+                const existingQuestions = chapter.questions || []
+                const existingSet = new Set(existingQuestions.map(q => q.question))
+                const newQuestions = questions.filter(q => !existingSet.has(q.question))
+                if (newQuestions.length > 0) {
+                  const merged = [...existingQuestions, ...newQuestions]
+                  await db.collection('chapters').doc(chapter._id).update({
+                    data: { questions: merged, questionCount: merged.length, updatedAt: new Date() }
+                  })
+                  results.updated++
+                  results.totalQuestions += newQuestions.length
+                } else { results.skipped++ }
+              } else {
+                await db.collection('chapters').add({
+                  data: { name, subject, questions: questions.map(q => ({ ...q, createdAt: new Date() })), questionCount: questions.length, createdAt: new Date(), updatedAt: new Date() }
+                })
+                results.created++
+                results.totalQuestions += questions.length
+              }
+            } catch (err) {
+              results.errors.push(`章节「${chapterData.name || '未知'}」失败: ${err.message}`)
+            }
+          }
+          result = { success: true, results }
         }
       }
 
@@ -270,5 +254,5 @@ app.post('/api', async (req, res) => {
 const PORT = process.env.PORT || 3000
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`服务器启动成功，监听端口 ${PORT}`)
-  console.log(`云开发环境: ${CLOUD_ENV}`)
+  console.log(`云开发环境: ${process.env.CLOUD_ENV || 'cloud1-d9gcbuql8f6a0bbaa'}`)
 })
