@@ -1,7 +1,6 @@
 const express = require('express')
-const cors = require('cors')
 
-// 初始化云开发 SDK
+// 初始化云开发 SDK（在中间件之前初始化，确保尽早配置）
 const cloud = require('wx-server-sdk')
 cloud.init({ env: process.env.CLOUD_ENV || 'cloud1-d9gcbuql8f6a0bbaa' })
 
@@ -9,9 +8,38 @@ const app = express()
 const db = cloud.database()
 const _ = db.command
 
-// 中间件
-app.use(cors())
+// ========== CORS 配置（关键！）==========
+// 手动设置所有 CORS 相关响应头，确保跨域请求能正常通过
+app.use((req, res, next) => {
+  // 允许所有来源（CORS 核心配置）
+  res.header('Access-Control-Allow-Origin', '*')
+  // 允许的 HTTP 方法
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+  // 允许的请求头
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With')
+  // 预检请求有效期
+  res.header('Access-Control-Max-Age', '86400')
+
+  // 处理 OPTIONS 预检请求
+  if (req.method === 'OPTIONS') {
+    console.log('[CORS] OPTIONS 预检请求 - 已处理')
+    return res.status(204).send()
+  }
+
+  next()
+})
+
+// 解析 JSON 请求体
 app.use(express.json({ limit: '10mb' }))
+
+// 错误处理中间件
+app.use((err, req, res, next) => {
+  console.error('[错误]', err)
+  res.status(500).json({
+    success: false,
+    error: err.message || '服务器内部错误'
+  })
+})
 
 // 健康检查
 app.get('/health', (req, res) => {
