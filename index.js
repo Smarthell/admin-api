@@ -1,17 +1,34 @@
 const express = require('express')
 
-// 初始化云开发 SDK（在中间件之前初始化，确保尽早配置）
+// 初始化云开发 SDK
 const cloud = require('wx-server-sdk')
-cloud.init({ env: process.env.CLOUD_ENV || 'cloud1-d9gcbuql8f6a0bbaa' })
+const ENV_ID = process.env.CLOUD_ENV || 'cloud1-d9gcbuql8f6a0bbaa'
+
+console.log('[初始化] 云开发环境:', ENV_ID)
+
+try {
+  cloud.init({ env: ENV_ID })
+  console.log('[初始化] 云开发 SDK 初始化成功')
+} catch (e) {
+  console.error('[初始化] 云开发 SDK 初始化失败:', e.message)
+}
 
 const app = express()
-const db = cloud.database()
-const _ = db.command
+let db = null
+let _ = null
+
+try {
+  db = cloud.database()
+  _ = db.command
+  console.log('[初始化] 数据库连接成功')
+} catch (e) {
+  console.error('[初始化] 数据库连接失败:', e.message)
+}
 
 // ========== CORS 配置（关键！）==========
-// 手动设置所有 CORS 相关响应头，确保跨域请求能正常通过
+// 在所有响应中添加 CORS 头，包括错误响应
 app.use((req, res, next) => {
-  // 允许所有来源（CORS 核心配置）
+  // 允许所有来源（CORS 核心配置）- 必须在最前面设置
   res.header('Access-Control-Allow-Origin', '*')
   // 允许的 HTTP 方法
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
@@ -19,11 +36,13 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With')
   // 预检请求有效期
   res.header('Access-Control-Max-Age', '86400')
+  // 暴露响应头（重要！）
+  res.header('Access-Control-Expose-Headers', 'Content-Length')
 
   // 处理 OPTIONS 预检请求
   if (req.method === 'OPTIONS') {
     console.log('[CORS] OPTIONS 预检请求 - 已处理')
-    return res.status(204).send()
+    return res.status(204).send('OK')
   }
 
   next()
@@ -43,7 +62,35 @@ app.use((err, req, res, next) => {
 
 // 健康检查
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: Date.now() })
+  res.json({ 
+    status: 'ok', 
+    timestamp: Date.now(),
+    dbAvailable: db !== null,
+    env: ENV_ID
+  })
+})
+
+// 数据库测试
+app.get('/test-db', async (req, res) => {
+  try {
+    if (!db) {
+      return res.json({ success: false, error: '数据库未初始化' })
+    }
+    // 尝试查询一个小的集合
+    const result = await db.collection('chapters').limit(1).get()
+    res.json({ 
+      success: true, 
+      message: '数据库连接成功',
+      dataCount: result.data.length
+    })
+  } catch (e) {
+    console.error('[数据库测试失败]', e)
+    res.json({ 
+      success: false, 
+      error: e.message,
+      hint: '可能原因：1. 免费版限制 2. 网络问题 3. 环境ID错误'
+    })
+  }
 })
 
 // 统一 API 入口
